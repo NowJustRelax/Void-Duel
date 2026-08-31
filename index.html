@@ -39,7 +39,7 @@ const CFG = {
   N_ASTEROIDS: 9,
   N_STARS_FAR: 140,
   N_STARS_NEAR: 60,
-  BPM: 104,
+  BPM: 132,
 };
 
 const FIGHTERS = [
@@ -95,6 +95,39 @@ function project(x,y,z){
 }
 
 /* ================= AUDIO ================= */
+/* ================= MUSIC PATTERN (4-bar phrase, 16 steps/bar = 64 steps) =============
+   Same rhythmic groove every bar (so it still feels like one driving beat), but the
+   bass/lead move through a chord progression (Am - F - C - G) instead of repeating
+   the same notes every single bar, plus a small fill in the last bar so the loop-back
+   reads as a turnaround instead of a hard repeat. 1 = hit, 0 = rest, 2 = accented hat. */
+const BAR_KICK  = [1,0,0,0, 0,0,1,0, 1,0,0,1, 0,0,0,0];
+const BAR_SNARE = [0,0,0,0, 1,0,0,0, 0,0,0,0, 1,0,0,0];
+const BAR_HAT   = [1,0,1,0, 1,0,1,0, 1,0,1,2, 1,0,1,0];
+const BASS_STEPS = [0,6,8,11];
+const LEAD_STEPS = [2,4,9,12];
+const CHORDS = [
+  { bass:110.00, lead:[220.00,261.63,329.63,440.00] }, // Am
+  { bass:87.31,  lead:[174.61,220.00,261.63,349.23] }, // F
+  { bass:130.81, lead:[261.63,329.63,392.00,523.25] }, // C
+  { bass:98.00,  lead:[196.00,246.94,293.66,392.00] }, // G
+];
+const KICK=[], SNARE=[], HAT=[], BASS=[], LEAD=[];
+CHORDS.forEach(chord=>{
+  for(let s=0;s<16;s++){
+    KICK.push(BAR_KICK[s]);
+    SNARE.push(BAR_SNARE[s]);
+    HAT.push(BAR_HAT[s]);
+    BASS.push(BASS_STEPS.includes(s) ? chord.bass : null);
+    const li = LEAD_STEPS.indexOf(s);
+    LEAD.push(li>=0 ? chord.lead[li] : null);
+  }
+});
+// small fill/turnaround in the closing bar so the loop restart feels intentional
+const lastBar = 48;
+KICK[lastBar+14]=1;
+SNARE[lastBar+13]=1; SNARE[lastBar+14]=1; SNARE[lastBar+15]=1;
+HAT[lastBar+13]=1; HAT[lastBar+15]=2;
+
 const Audio_ = {
   ctx:null, master:null, comp:null, unlocked:false,
   beatIdx:0, nextNoteTime:0, lookahead:0.12, timerId:null,
@@ -118,11 +151,11 @@ const Audio_ = {
   scheduler(){
     const step = ()=>{
       if(this.ctx && this.ctx.state==='running'){
-        const secPerBeat = 60/CFG.BPM;
+        const secPerStep = 60/CFG.BPM/4; // 16th notes
         if(this.nextNoteTime < this.ctx.currentTime) this.nextNoteTime = this.ctx.currentTime + 0.05;
         while(this.nextNoteTime < this.ctx.currentTime + this.lookahead){
-          this.beatPulse(this.nextNoteTime, this.beatIdx);
-          this.nextNoteTime += secPerBeat;
+          this.playStep(this.nextNoteTime, this.beatIdx % 64);
+          this.nextNoteTime += secPerStep;
           this.beatIdx++;
         }
       }
@@ -138,22 +171,67 @@ const Audio_ = {
     g.gain.exponentialRampToValueAtTime(Math.max(sustain,0.0001), t0+a+d);
     if(t1) g.gain.exponentialRampToValueAtTime(0.0001, t1);
   },
-  beatPulse(t, idx){
-    if(!beatListeners.length) { /* still fire visual beat via game clock */ }
-    // sparse low thump every beat, accent every 4th
-    const accent = (idx % 4 === 0);
-    const o = this.ctx.createOscillator();
-    const g = this.ctx.createGain();
+  playStep(t, step){
+    if(KICK[step])  this.kickSound(t);
+    if(SNARE[step]) this.snareSound(t);
+    if(HAT[step])   this.hihatSound(t, HAT[step]===2);
+    if(BASS[step]!=null) this.bassSound(BASS[step], t);
+    if(LEAD[step]!=null) this.leadSound(LEAD[step], t);
+    if(KICK[step]) onBeatVisual(step%16===0 || step%16===8);
+    if(step%16===0 && Math.random()<0.12) this.shimmer();
+  },
+  kickSound(t){
+    const o=this.ctx.createOscillator(), g=this.ctx.createGain();
     o.type='sine';
-    o.frequency.setValueAtTime(accent?64:46, t);
-    o.frequency.exponentialRampToValueAtTime(28, t+0.22);
-    g.gain.setValueAtTime(0.0001,t);
-    g.gain.linearRampToValueAtTime(accent?0.32:0.16, t+0.012);
-    g.gain.exponentialRampToValueAtTime(0.0001, t+0.30);
+    o.frequency.setValueAtTime(150,t);
+    o.frequency.exponentialRampToValueAtTime(42,t+0.12);
+    g.gain.setValueAtTime(0.16,t);
+    g.gain.exponentialRampToValueAtTime(0.0001,t+0.22);
     o.connect(g); g.connect(this.master);
-    o.start(t); o.stop(t+0.32);
-    onBeatVisual(accent);
-    if(Math.random()<0.12) this.shimmer();
+    o.start(t); o.stop(t+0.24);
+  },
+  snareSound(t){
+    this.noiseBurst(t,0.14,3400,0.11);
+    const o=this.ctx.createOscillator(), g=this.ctx.createGain();
+    o.type='triangle'; o.frequency.setValueAtTime(210,t);
+    g.gain.setValueAtTime(0.08,t);
+    g.gain.exponentialRampToValueAtTime(0.0001,t+0.1);
+    o.connect(g); g.connect(this.master);
+    o.start(t); o.stop(t+0.12);
+  },
+  hihatSound(t, accent){
+    const dur = accent?0.13:0.045;
+    const bufSize = Math.max(1,Math.floor(this.ctx.sampleRate*dur));
+    const buf=this.ctx.createBuffer(1,bufSize,this.ctx.sampleRate);
+    const d=buf.getChannelData(0);
+    for(let i=0;i<bufSize;i++) d[i]=(Math.random()*2-1)*(1-i/bufSize);
+    const src=this.ctx.createBufferSource(); src.buffer=buf;
+    const f=this.ctx.createBiquadFilter(); f.type='highpass'; f.frequency.value=7000;
+    const g=this.ctx.createGain();
+    g.gain.setValueAtTime(accent?0.056:0.032,t);
+    g.gain.exponentialRampToValueAtTime(0.0001,t+dur);
+    src.connect(f); f.connect(g); g.connect(this.master);
+    src.start(t); src.stop(t+dur+0.01);
+  },
+  bassSound(freq,t){
+    const o=this.ctx.createOscillator(), g=this.ctx.createGain(), f=this.ctx.createBiquadFilter();
+    o.type='sawtooth'; o.frequency.value=freq;
+    f.type='lowpass'; f.frequency.setValueAtTime(1200,t); f.frequency.exponentialRampToValueAtTime(280,t+0.18);
+    g.gain.setValueAtTime(0.0001,t);
+    g.gain.linearRampToValueAtTime(0.136,t+0.008);
+    g.gain.exponentialRampToValueAtTime(0.0001,t+0.22);
+    o.connect(f); f.connect(g); g.connect(this.master);
+    o.start(t); o.stop(t+0.24);
+  },
+  leadSound(freq,t){
+    const o=this.ctx.createOscillator(), g=this.ctx.createGain(), f=this.ctx.createBiquadFilter();
+    o.type='square'; o.frequency.value=freq;
+    f.type='lowpass'; f.frequency.value=3200;
+    g.gain.setValueAtTime(0.0001,t);
+    g.gain.linearRampToValueAtTime(0.064,t+0.01);
+    g.gain.exponentialRampToValueAtTime(0.0001,t+0.28);
+    o.connect(f); f.connect(g); g.connect(this.master);
+    o.start(t); o.stop(t+0.3);
   },
   laser(color){
     if(!this.ctx || this.ctx.state!=='running') return;
@@ -164,9 +242,16 @@ const Audio_ = {
     o.frequency.setValueAtTime(base*1.3, t);
     o.frequency.exponentialRampToValueAtTime(base+rand(-30,30), t+0.02);
     o.frequency.exponentialRampToValueAtTime(base*0.28, t+0.13);
-    f.type='bandpass'; f.frequency.value=1400; f.Q.value=6;
+    // the filter now tracks the same downward sweep as the oscillator instead of
+    // sitting fixed at 1400Hz -- a static filter that narrow was cutting off most
+    // of the tail of the sweep (which drops to ~1/4 of base) regardless of gain,
+    // which is why turning the gain up kept not making it louder
+    f.type='bandpass'; f.Q.value=2.2;
+    f.frequency.setValueAtTime(base*1.3, t);
+    f.frequency.exponentialRampToValueAtTime(base, t+0.02);
+    f.frequency.exponentialRampToValueAtTime(base*0.28, t+0.13);
     g.gain.setValueAtTime(0.0001,t);
-    g.gain.linearRampToValueAtTime(0.32, t+0.006);
+    g.gain.linearRampToValueAtTime(0.4, t+0.006);
     g.gain.exponentialRampToValueAtTime(0.0001, t+0.15);
     o.connect(f); f.connect(g); g.connect(this.master);
     o.start(t); o.stop(t+0.17);
@@ -235,31 +320,6 @@ const Audio_ = {
     notes.forEach((f,i)=>{ this.beep(f, t0+i*0.10, 0.35, 0.24); });
   },
   engineNoise: null,
-  ambientPad: null,
-  initAmbientPad(){
-    if(!this.ctx || this.ambientPad) return;
-    const notes = [55, 110, 164.81]; // low spacious drone (A1, A2, E3)
-    const bus = this.ctx.createGain(); bus.gain.value = 0.15;
-    const filt = this.ctx.createBiquadFilter(); filt.type='lowpass'; filt.frequency.value=700; filt.Q.value=0.6;
-    bus.connect(filt); filt.connect(this.master);
-    const oscs = [];
-    notes.forEach((freq,i)=>{
-      const o = this.ctx.createOscillator();
-      o.type = i===0 ? 'sine' : 'triangle';
-      o.frequency.value = freq;
-      o.detune.value = rand(-7,7);
-      const og = this.ctx.createGain(); og.gain.value = i===0?0.65:0.32;
-      o.connect(og); og.connect(bus);
-      o.start();
-      oscs.push(o);
-    });
-    // slow LFO drifting the filter cutoff so the drone breathes rather than sitting static
-    const lfo = this.ctx.createOscillator(); lfo.type='sine'; lfo.frequency.value=0.045;
-    const lfoGain = this.ctx.createGain(); lfoGain.gain.value=260;
-    lfo.connect(lfoGain); lfoGain.connect(filt.frequency);
-    lfo.start();
-    this.ambientPad = { bus, filt, oscs, lfo };
-  },
   shimmer(){
     if(!this.ctx || this.ctx.state!=='running') return;
     const t=this.ctx.currentTime;
@@ -290,14 +350,12 @@ const Audio_ = {
     if(this.engineNoise) this.engineNoise.g.gain.setTargetAtTime(clamp(v,0,0.06), this.now(), 0.15);
   }
 };
-const beatListeners = [];
 let lastBeatFlash = 0, beatFlashAccent=false;
 function onBeatVisual(accent){ lastBeatFlash = 1; beatFlashAccent = accent; }
 
 function unlockAudio(){
   Audio_.init();
   Audio_.initEngineHum();
-  Audio_.initAmbientPad();
   Audio_.tryResume();
 }
 const unlockEvents = ['pointerdown','keydown','touchstart','mousemove','wheel'];
